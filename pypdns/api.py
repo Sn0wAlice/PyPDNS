@@ -322,16 +322,23 @@ class PyPDNS:
 
     def iter_query(self, q: str,
                    filter_rrtype: str | None=None,
-                   break_on_errors: bool=False) -> Generator[PDNSRecord, None, dict[str, str | int] | None]:
+                   break_on_errors: bool=False,
+                   *, page_size: int=50) -> Generator[PDNSRecord, None, dict[str, str | int] | None]:
         '''Iterate over all the recording matching your request, useful if there are a lot.
         Note: the order is non-deterministic.
 
         :param q: The query
         :param filter_rrtype: The filter, must be a valid RR Type or the response will be empty.
         :param break_on_errors: If there is an error, stop iterating and break immediately
+        :param page_size: How many records to fetch per request. The pages are fetched
+                          sequentially, so a bigger page means fewer round trips on a big
+                          response, at the cost of more memory per response. The server
+                          may cap it to a lower value.
         '''
+        if page_size < 1:
+            raise PDNSError('page_size must be a strictly positive integer.')
         cursor = -1
-        query_headers = {'dribble-paginate-count': '50'}
+        query_headers = {'dribble-paginate-count': str(page_size)}
         if filter_rrtype:
             query_headers['dribble-filter-rrtype'] = filter_rrtype
         while True:
