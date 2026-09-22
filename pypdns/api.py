@@ -344,12 +344,13 @@ class PyPDNS:
                 if e := self._handle_dribble_errors(response):
                     return e
 
+            if getattr(response, 'from_cache', False):
+                logger.debug("from cache query() q=[%s]", q)
+
             for line in response.text.split('\n'):
                 if len(line) == 0:
                     continue
                 try:
-                    if isinstance(response, CachedResponse) and response.from_cache is True:
-                        logger.debug("from cache query() q=[%s]", q)
                     obj = json.loads(line)
                 except Exception:
                     logger.exception("except query() q=[%s]", q)
@@ -376,13 +377,14 @@ class PyPDNS:
         if response.status_code != 200:
             self._handle_http_error(response)
         errors = self._handle_dribble_errors(response)
+        if getattr(response, 'from_cache', False):
+            logger.debug("from cache query() q=[%s]", q)
+
         to_return = []
         for line in response.text.split('\n'):
             if len(line) == 0:
                 continue
             try:
-                if isinstance(response, CachedResponse) and response.from_cache is True:
-                    logger.debug("from cache query() q=[%s]", q)
                 obj = json.loads(line)
             except Exception:
                 logger.exception("except query() q=[%s]", q)
