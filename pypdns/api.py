@@ -11,12 +11,12 @@ from typing import Any, TypedDict, overload, Literal, Generator
 
 import requests
 from requests import Session, Response
-from dns.rdatatype import RdataType
+from dns.exception import DNSException
+from dns.rdatatype import RdataType, to_text as rrtype_to_text
 
 from pypdns.errors import PDNSError, UnauthorizedError, ForbiddenError, RateLimitError, ServerError, PDNSRecordTypeError
 
 try:
-    import requests_cache
     from requests_cache import CachedSession
     from requests_cache.models import CachedResponse  # type: ignore[attr-defined]
     HAS_CACHE = True
@@ -26,6 +26,8 @@ except ImportError:
 logger = logging.getLogger("pypdns")
 
 sort_choice = ['count', 'rdata', 'rrname', 'rrtype', 'time_first', 'time_last']
+
+default_timeout = 15
 
 # Optional fields of a COF record, and the python type each one must have.
 _optional_fields: dict[str, type] = {
@@ -90,14 +92,16 @@ class PDNSRecord:
         if not isinstance(raw['rrname'], str):
             raise PDNSRecordTypeError('rrname', 'str', raw['rrname'])
 
-        if not isinstance(raw['rrtype'], (str, int)):
-            raise PDNSRecordTypeError('rrtype', 'str, int', raw['rrtype'])
+        rrtype_raw = raw['rrtype']
+        if not isinstance(rrtype_raw, (str, int)):
+            raise PDNSRecordTypeError('rrtype', 'str, int', rrtype_raw)
 
-        if isinstance(raw['rrtype'], int):
-            # Accordingly to the specs, the type can be a string OR an int. we normalize to str
-            rrtype: str = RdataType(raw['rrtype']).name
-        else:
-            rrtype = RdataType[raw['rrtype'].upper()].name
+        try:
+            # Accordingly to the specs, the type can be a string OR an int. we normalize to str.
+            # make()/to_text() also cover the RFC 3597 "TYPE65535" spelling.
+            rrtype = rrtype_to_text(RdataType.make(rrtype_raw))
+        except (DNSException, ValueError):
+            raise PDNSRecordTypeError('rrtype', 'valid RR type', rrtype_raw)
 
         if not isinstance(raw['rdata'], (str, list)):
             raise PDNSRecordTypeError('rdata', 'str, list of string', raw['rdata'])
@@ -265,8 +269,9 @@ class PyPDNS:
 
         self.session: CachedSession | Session
         if enable_cache is True:
-            requests_cache.install_cache(cache_file, backend='sqlite', expire_after=cache_expire_after)
-            self.session = requests_cache.CachedSession()
+            # NOT install_cache(): that one patches requests.Session for the whole process.
+            self.session = CachedSession(cache_name=cache_file, backend='sqlite',
+                                         expire_after=cache_expire_after)
         else:
             self.session = requests.Session()
         self.session.headers['user-agent'] = useragent if useragent else f'PyPDNS / {version("pypdns")}'
@@ -294,13 +299,15 @@ class PyPDNS:
     def iter_query(self, q: str,
                    filter_rrtype: str | None=None,
                    break_on_errors: bool=False,
-                   *, page_size: int=50) -> Generator[PDNSRecord, None, dict[str, str | int] | None]:
+                   *, page_size: int=50,
+                   timeout: int=default_timeout) -> Generator[PDNSRecord, None, dict[str, str | int] | None]:
         '''Iterate over all the recording matching your request, useful if there are a lot.
         Note: the order is non-deterministic.
 
         :param q: The query
         :param filter_rrtype: The filter, must be a valid RR Type or the response will be empty.
         :param break_on_errors: If there is an error, stop iterating and break immediately
+        :param timeout: Timeout of each HTTP request, in seconds
         :param page_size: How many records to fetch per request. The pages are fetched
                           sequentially, so a bigger page means fewer round trips on a big
                           response, at the cost of more memory per response. The server
@@ -315,7 +322,7 @@ class PyPDNS:
         while True:
             if cursor > 0:
                 query_headers['dribble-paginate-cursor'] = str(cursor)
-            response: Response | CachedResponse = self.session.get(f'{self.url}/{q}', timeout=15, headers=query_headers)
+            response: Response | CachedResponse = self.session.get(f'{self.url}/{q}', timeout=timeout, headers=query_headers)
             if response.status_code != 200:
                 self._handle_http_error(response)
             if break_on_errors:
@@ -342,7 +349,8 @@ class PyPDNS:
 
     def _query(self, q: str, sort_by: str = 'time_last',
                *,
-               filter_rrtype: str | None=None) -> tuple[list[dict[str, str | int | bool | list[str] | dict[Any, Any] | None]],
+               filter_rrtype: str | None=None,
+               timeout: int=default_timeout) -> tuple[list[dict[str, str | int | bool | list[str] | dict[Any, Any] | None]],
                                                         dict[str, str | int]]:
         '''Internal method running a non-paginated query, can be sorted.'''
         logger.debug("start query() q=[%s]", q)
@@ -351,7 +359,7 @@ class PyPDNS:
         query_headers = {}
         if filter_rrtype:
             query_headers['dribble-filter-rrtype'] = filter_rrtype
-        response: Response | CachedResponse = self.session.get(f'{self.url}/{q}', timeout=15, headers=query_headers)
+        response: Response | CachedResponse = self.session.get(f'{self.url}/{q}', timeout=timeout, headers=query_headers)
         if response.status_code != 200:
             self._handle_http_error(response)
         errors = self._handle_dribble_errors(response)
@@ -368,7 +376,12 @@ class PyPDNS:
                 logger.exception("except query() q=[%s]", q)
                 raise PDNSError(f'Unable to decode JSON object: {line}')
             to_return.append(obj)
-        to_return = sorted(to_return, key=lambda k: k[sort_by])
+        try:
+            to_return.sort(key=lambda k: k[sort_by])
+        except KeyError:
+            raise PDNSError(f'Unable to sort by "{sort_by}": some records do not have that key.')
+        except TypeError:
+            raise PDNSError(f'Unable to sort by "{sort_by}": records have mixed types for that key.')
         return to_return, errors
 
     @overload
@@ -376,6 +389,7 @@ class PyPDNS:
                   *,
                   sort_by: str = 'time_last',
                   filter_rrtype: str | None= None,
+                  timeout: int=default_timeout,
                   with_errors: Literal[True]) -> tuple[list[PDNSRecord], dict[str, str | int]]:
         pass
 
@@ -384,6 +398,7 @@ class PyPDNS:
                   *,
                   sort_by: str = 'time_last',
                   filter_rrtype: str | None= None,
+                  timeout: int=default_timeout,
                   with_errors: Literal[False]) -> list[PDNSRecord]:
         pass
 
@@ -391,15 +406,17 @@ class PyPDNS:
                   *,
                   sort_by: str = 'time_last',
                   filter_rrtype: str | None= None,
+                  timeout: int=default_timeout,
                   with_errors: bool=False) -> list[PDNSRecord] | tuple[list[PDNSRecord], dict[str, str | int]]:
         '''Triggers a non-paginated query, can be sorted but will raise an error if the response is too big.
 
         :param q: The query
         :param sort_by: The key to use to sort the records
         :param filter_rrtype: The filter, must be a valid RR Type or the response will be enpty.
+        :param timeout: Timeout of the HTTP request, in seconds
         :param with_errors: Returns the errors (if any)
         '''
-        records, errors = self._query(q, sort_by, filter_rrtype=filter_rrtype)
+        records, errors = self._query(q, sort_by, filter_rrtype=filter_rrtype, timeout=timeout)
         to_return_records = [PDNSRecord(record) for record in records]
         if not with_errors:
             return to_return_records
@@ -410,7 +427,8 @@ class PyPDNS:
         It was a bad design decision years ago. Use rfc_query instead for something saner.
         This method is deprecated.
         '''
-        records, errors = self._query(q, sort_by)
+        records, errors = self._query(q, sort_by,
+                                      timeout=timeout if timeout is not None else default_timeout)
         for record in records:
             record['time_first'] = datetime.fromtimestamp(record['time_first'], timezone.utc)  # type: ignore
             record['time_last'] = datetime.fromtimestamp(record['time_last'], timezone.utc)  # type: ignore
