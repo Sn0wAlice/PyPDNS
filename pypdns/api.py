@@ -27,6 +27,21 @@ logger = logging.getLogger("pypdns")
 
 sort_choice = ['count', 'rdata', 'rrname', 'rrtype', 'time_first', 'time_last']
 
+# Optional fields of a COF record, and the python type each one must have.
+_optional_fields: dict[str, type] = {
+    'count': int,
+    'bailiwick': str,
+    'sensor_id': str,
+    'zone_time_first': int,
+    'zone_time_last': int,
+    'origin': str,
+    'time_first_ms': int,
+    'time_last_ms': int,
+    'time_first_rfc3339': str,
+    'time_last_rfc3339': str,
+    'meta': dict,
+}
+
 
 class TypedPDNSRecord(TypedDict, total=False):
     '''A dict representing a Passive DNS record'''
@@ -70,86 +85,42 @@ class PDNSRecord:
 
     def __init_typed_record(self) -> TypedPDNSRecord:
         '''The record as a python dictionary'''
-        if not isinstance(self._raw_record['rrname'], str):
-            raise PDNSRecordTypeError('rrname', 'str', self._raw_record["rrname"])
+        raw = self._raw_record
 
-        if not isinstance(self._raw_record['rrtype'], (str, int)):
-            raise PDNSRecordTypeError('rrtype', 'str, int', self._raw_record["rrtype"])
+        if not isinstance(raw['rrname'], str):
+            raise PDNSRecordTypeError('rrname', 'str', raw['rrname'])
 
-        if isinstance(self._raw_record['rrtype'], int):
+        if not isinstance(raw['rrtype'], (str, int)):
+            raise PDNSRecordTypeError('rrtype', 'str, int', raw['rrtype'])
+
+        if isinstance(raw['rrtype'], int):
             # Accordingly to the specs, the type can be a string OR an int. we normalize to str
-            rrtype: str = RdataType(self._raw_record['rrtype']).name
+            rrtype: str = RdataType(raw['rrtype']).name
         else:
-            rrtype = RdataType[self._raw_record['rrtype'].upper()].name
+            rrtype = RdataType[raw['rrtype'].upper()].name
 
-        if not isinstance(self._raw_record['rdata'], (str, list)):
-            raise PDNSRecordTypeError('rdata', 'str, list of string', self._raw_record["rdata"])
+        if not isinstance(raw['rdata'], (str, list)):
+            raise PDNSRecordTypeError('rdata', 'str, list of string', raw['rdata'])
 
-        if not isinstance(self._raw_record['time_first'], int):
-            raise PDNSRecordTypeError('time_first', 'int', self._raw_record["time_first"])
+        if not isinstance(raw['time_first'], int):
+            raise PDNSRecordTypeError('time_first', 'int', raw['time_first'])
 
-        if not isinstance(self._raw_record['time_last'], int):
-            raise PDNSRecordTypeError('time_last', 'int', self._raw_record["time_last"])
+        if not isinstance(raw['time_last'], int):
+            raise PDNSRecordTypeError('time_last', 'int', raw['time_last'])
 
-        to_return: TypedPDNSRecord = {'rrname': self._raw_record['rrname'],
+        to_return: TypedPDNSRecord = {'rrname': raw['rrname'],
                                       'rrtype': rrtype,
-                                      'rdata': self._raw_record['rdata'],
-                                      'time_first': self._raw_record["time_first"],
-                                      'time_last': self._raw_record["time_last"]}
-        if 'count' in self._raw_record:
-            if not isinstance(self._raw_record['count'], int):
-                raise PDNSRecordTypeError('count', 'int', self._raw_record["count"])
-            to_return['count'] = self._raw_record["count"]
+                                      'rdata': raw['rdata'],
+                                      'time_first': raw['time_first'],
+                                      'time_last': raw['time_last']}
 
-        if 'bailiwick' in self._raw_record:
-            if not isinstance(self._raw_record['bailiwick'], str):
-                raise PDNSRecordTypeError('bailiwick', 'str', self._raw_record["bailiwick"])
-            to_return['bailiwick'] = self._raw_record['bailiwick']
-
-        if 'sensor_id' in self._raw_record:
-            if not isinstance(self._raw_record['sensor_id'], str):
-                raise PDNSRecordTypeError('sensor_id', 'str', self._raw_record["sensor_id"])
-            to_return['sensor_id'] = self._raw_record['sensor_id']
-
-        if 'zone_time_first' in self._raw_record:
-            if not isinstance(self._raw_record['zone_time_first'], int):
-                raise PDNSRecordTypeError('zone_time_first', 'int', self._raw_record["zone_time_first"])
-            to_return['zone_time_first'] = self._raw_record['zone_time_first']
-
-        if 'zone_time_last' in self._raw_record:
-            if not isinstance(self._raw_record['zone_time_last'], int):
-                raise PDNSRecordTypeError('zone_time_last', 'int', self._raw_record["zone_time_last"])
-            to_return['zone_time_first'] = self._raw_record["zone_time_last"]
-
-        if 'origin' in self._raw_record:
-            if not isinstance(self._raw_record['origin'], str):
-                raise PDNSRecordTypeError('origin', 'str', self._raw_record["origin"])
-            to_return['origin'] = self._raw_record["origin"]
-
-        if 'time_first_ms' in self._raw_record:
-            if not isinstance(self._raw_record['time_first_ms'], int):
-                raise PDNSRecordTypeError('time_first_ms', 'int', self._raw_record["time_first_ms"])
-            to_return['time_first_ms'] = self._raw_record["time_first_ms"]
-
-        if 'time_last_ms' in self._raw_record:
-            if not isinstance(self._raw_record['time_last_ms'], int):
-                raise PDNSRecordTypeError('time_last_ms', 'int', self._raw_record["time_last_ms"])
-            to_return['time_last_ms'] = self._raw_record['time_last_ms']
-
-        if 'time_first_rfc3339' in self._raw_record:
-            if not isinstance(self._raw_record['time_first_rfc3339'], str):
-                raise PDNSRecordTypeError('time_first_rfc3339', 'str', self._raw_record["time_first_rfc3339"])
-            to_return['time_first_rfc3339'] = self._raw_record['time_first_rfc3339']
-
-        if 'time_last_rfc3339' in self._raw_record:
-            if not isinstance(self._raw_record['time_last_rfc3339'], str):
-                raise PDNSRecordTypeError('time_last_rfc3339', 'str', self._raw_record["time_last_rfc3339"])
-            to_return['time_last_rfc3339'] = self._raw_record['time_last_rfc3339']
-
-        if 'meta' in self._raw_record:
-            if not isinstance(self._raw_record['meta'], dict):
-                raise PDNSRecordTypeError('meta', 'dict', self._raw_record["meta"])
-            to_return['meta'] = self._raw_record['meta']
+        for name, expected_type in _optional_fields.items():
+            if name not in raw:
+                continue
+            value = raw[name]
+            if not isinstance(value, expected_type):
+                raise PDNSRecordTypeError(name, expected_type.__name__, value)
+            to_return[name] = value  # type: ignore[literal-required]
         return to_return
 
     @property
